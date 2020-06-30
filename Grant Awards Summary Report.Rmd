@@ -11,23 +11,27 @@ library(knitr)
 library(tidyverse)
 library(plotly)
 library(data.table)
+library(tibble)
 ```
 
 User inputs
 ```{r, message=FALSE}
-setwd('S:/Bernard/Logan')
-fileSource <- "NSF, all years" #used in title of plots
+fileSource <- "NSF" #used in title of plots
 numPrint <- 10 #prints this many of the highest below plots
+cutoffYear <- 2010
+mostRecent <- "Jun 2020" #most recent date of pulled data 
+titleSnippet <- paste0(fileSource, ", ", cutoffYear, " to ", mostRecent)
 ```
 
 Load in the data and sort by Organization name.
 ```{r, message=FALSE}
-data <- read.csv('NSF 2020-06-10 armi_df_whole.csv', stringsAsFactors = F) #choose file
+data <- read.csv('SBIR 2020-06-08 armi_df_whole.csv', stringsAsFactors = F) #choose file
 data <- data[order(data$Organization),] #order according to Organization (A-Z)
 ```
 
 Clean the data: remove commas, "Inc.", "Inc", "Llc", and trailing white spaces.
 ```{r, message=FALSE}
+totalRows <- nrow(data)
 cleaned <- data
 cleaned$Organization <- gsub(",", "", cleaned$Organization) #removes commas
 cleaned$Organization <- gsub("Incorporated", "", cleaned$Organization) #removes Incorp
@@ -35,38 +39,41 @@ cleaned$Organization <- gsub("Inc.", "", cleaned$Organization) #removes Inc.
 cleaned$Organization <- gsub("Inc", "", cleaned$Organization) #removes Inc
 cleaned$Organization <- gsub("Llc", "", cleaned$Organization) #removes Llc
 cleaned$Organization <- trimws(cleaned$Organization) #removes trailing spaces
-print(paste0("Number of unique orgs before: ",nrow(data)))
-print(paste0("Number of unique orgs after: ",nrow(cleaned)))
-print("The above values should be equal.")
+cleaned$Organization <- gsub("\\s+", " ", cleaned$Organization) #merges multiple white spaces into one
+cleaned_cutoff <- cleaned %>% filter(cleaned$FY >= cutoffYear)
+
+print(paste0(totalRows, " total unique awards"))
+print(paste0(nrow(cleaned %>% filter(cleaned$FY == 0)), " did not capture a year"))
+print(paste0(nrow(cleaned_cutoff), " were awarded after the cutoff year"))
+print(paste0(nrow(cleaned_cutoff %>% filter(cleaned_cutoff$Funding == 0)), " showed $0 in funding"))
 ```
 
-Filter and organize data for plotting.
+Stacked histogram - Total number of awards per organization
 ```{r, message=FALSE, warning=F}
-filtered <- cleaned %>% select(Organization, Tissue) #select rows you want to keep
+filtered <- cleaned_cutoff %>% select(Organization, Tissue) #select rows you want to keep
 counts <- as.data.frame(table(filtered), stringsAsFactors = F) 
 #consolidate by tissue type and count frequency
-counts <- counts[!grepl("0", counts$Freq),] #removes frequencies of zero
+counts <- counts %>% filter(counts$Freq != 0) #removes frequencies of zero
 
 #order bars in plot
 #remove tissue type column  #sum freq's per org
 countsOrder <- counts %>% select(!Tissue) %>% group_by(Organization) %>% summarize(Freq = sum(Freq))
 #order by Freq to establish customer factors
-countsOrder <- countsOrder[order(countsOrder$Freq, decreasing=T),]
+countsOrder <- countsOrder[order(countsOrder$Freq, decreasing=F),]
 counts$Organization <- factor(counts$Organization, level=countsOrder$Organization)
-```
 
-Stacked histogram - Total number of awards per organization
-```{r, warning=FALSE}
 #create stacked histogram plot showing breakdown of awards per organization and their tissue types
-hist <- plot_ly(x = ~counts$Organization, y = ~counts$Freq, type = 'bar', 
+hist <- plot_ly(y = ~counts$Organization, x = ~counts$Freq, type = 'bar', orientation = 'h', 
                 name = ~counts$Tissue, color = ~counts$Tissue) %>%
-  layout(title=paste0("Tissue Type / Organization Breakdown (", fileSource, ")"), yaxis = list(tickprefix=" ", title = 'Number of Awards'), xaxis = list(title = 'Organization Name'), barmode = 'stack')
+  layout(margin = list(l = 300), title=paste0("Tissue Type / Organization Breakdown (", titleSnippet, ")"), 
+         yaxis = list(title = 'Number of Awards'), xaxis = list(title = 'Organization Name'), barmode = 'stack')
 hist
 ```
+
 Top 10 organizations by most total awards
 ```{r}
-for(i in 1:numPrint){
-  print(as.character(countsOrder$Organization[i]))
+for(i in 0:numPrint){
+  print(as.character(countsOrder$Organization[length(countsOrder$Organization)-i]))
 }
 ```
 
@@ -75,7 +82,7 @@ Pie plot - Total number of awards per tissue type
 #create pie plot showing breakdown of total number of awards per tissue type
 pieData <- as.data.frame(table(filtered[,-1]), stringsAsFactors = F)
 pie <- plot_ly(pieData, labels = ~Var1, values = ~Freq, type = 'pie') %>% 
-  layout(title = paste0("Tissue Distribution (", fileSource, ")"),
+  layout(title = paste0("Tissue Distribution (", titleSnippet, ")"),
          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
 pie
@@ -89,46 +96,66 @@ for(i in 1:5){ #print top 5 tissue types
 ```
 
 Bar plot - Amount of funding per organization
-```{r, warning=F}
+```{r, message=FALSE, warning=F}
 #select pertinent columns
-fundData <- cleaned %>% select(Organization,Funding)
-fundSums <- fundData %>% group_by(Organization) %>% summarize(
-  Funding = sum(Funding) #sum funding across all awards by organization
-) 
-numZero <- nrow(fundSums[fundSums$Funding==0,])
+fundData <- cleaned_cutoff %>% 
+  select(Organization,Funding,Tissue) %>% 
+  mutate(Funding=round(cleaned_cutoff$Funding, -3))
+#create factor levels
+lev <- fundData %>% group_by(Organization) %>% summarize(Funding = sum(Funding))
+lev <- lev[order(lev$Funding),]
+#assign factor levels
+fundData$Organization <- factor(fundData$Organization,levels = lev$Organization)
+ 
 
-fundSums$Funding <- round(fundSums$Funding, -3)
-fundSums$Organization <- factor(fundSums$Organization, 
-                                levels = fundSums$Organization[order(fundSums$Funding, decreasing = TRUE)])
-bar <- plot_ly(fundSums, x = ~Organization, y = ~Funding, type = 'bar') %>%
-   layout(title = paste0("Funding per Organization (", fileSource, ")"),
-                        xaxis = list(title = "Organization Name"),
-                        yaxis = list(title = "Funding ($)"))
+
+#function to find factor levels based on size of bar section 
+orderFunction <- function(df,groupBy){
+  
+}
+
+#filter the bar sections by value
+#test <- as_tibble(fundData)
+#1. iterate across each group, this one is grouped by organization
+#for(i in 1:length(lev$Organization)){
+  #2. apply an ordering function inside the loop to get factor levels
+#  testLev_perOrg <- test
+  
+  #3. assign those factors as levels within each group
+#  test <- test %>% group_modify(factor)
+#}
+
+
+
+#plot
+bar <- plot_ly(fundData, x = ~Funding, y = ~Organization, type = 'bar',
+               name = ~Tissue, color = ~Tissue) %>%
+   layout(margin = list(l = 300), title = paste0("Funding per Organization (", titleSnippet, ")"),
+                        xaxis = list(title = "Funding ($)"),
+                        yaxis = list(title = "Organization Name"), orientation = 'h', barmode='stack')
 bar
 ```
 
 Top 10 most funded organizations
 ```{r}
-fundSums <- fundSums[order(fundSums$Funding, decreasing = T),]
+fundData <- fundData[order(fundData$Funding, decreasing = T),]
 for(i in 1:numPrint){ #print 10 most funded orgs 
-  print(as.character(fundSums$Organization[i]))
+  print(as.character(fundData$Organization[i]))
 }
-
-print(paste0("The number of awards showing zero funding was ",numZero))
 ```
 
 Bar plot - Amount funding per tissue type
 ```{r, warning=F, message=F}
-tissuesFunded <- cleaned %>% select(Funding,Tissue)
-tissuesFunded$Funding <- round(tissuesFunded$Funding, -3)
-tissuesFunded <- tissuesFunded %>% group_by(Tissue) %>% summarize(
-  Funding = sum(Funding) #sum funding across all awards by organization
-)
+tissuesFunded <- cleaned_cutoff %>% select(Funding,Tissue) %>% 
+  mutate(Funding = round(Funding,-3)) %>%
+  group_by(Tissue) %>% 
+  summarize(Funding = sum(Funding))
+#factor levels
 tissuesFunded$Tissue <- factor(tissuesFunded$Tissue, 
-                        levels = tissuesFunded$Tissue[order(tissuesFunded$Funding, decreasing = TRUE)])
+                        levels = tissuesFunded$Tissue[order(tissuesFunded$Funding, decreasing=T)])
 
 bar2 <- plot_ly(tissuesFunded, x = ~Tissue, y = ~Funding, type = 'bar') %>%
-   layout(title = paste0("Funding per Tissue Type (", fileSource, ")"),
+   layout(title = paste0("Funding per Tissue Type (", titleSnippet, ")"),
                         xaxis = list(title = "Tissue Type"),
                         yaxis = list(title = "Total Funding ($)"))
 bar2
@@ -143,19 +170,29 @@ for(i in 1:5){ #print top 5 tissue types
 
 Bar plot - Number of grants received per year through 2020
 ```{r, warning=F, message=F}
-years <- cleaned %>% select(FY,Tissue) %>% filter(FY!=0)
-years <- as.data.frame(table(years), stringsAsFactors = F)
-years <- years[!grepl("0", years$Freq),]
+years_precutoff <- cleaned %>% select(FY,Tissue) %>% filter(FY!=0)
+years_b4tbl <- years_precutoff %>% filter(FY >= cutoffYear)
+years <- as.data.frame(table(years_b4tbl), stringsAsFactors = F)
+years <- years %>% filter(years$Freq!=0)
 
-hist2 <- plot_ly(x = ~years$FY, y = ~years$Freq, type = 'bar', 
+hist2 <- plot_ly(x = ~years$FY, y = ~years$Freq, type = 'bar',
                  name = ~years$Tissue, color = ~years$Tissue) %>%
-  layout(title=paste0("Number of Awards over Time, per Tissue Type (", fileSource, ")"), yaxis = list(tickprefix=" ", title = 'Number of Awards'), xaxis = list(title = 'Year'), barmode = 'stack')
+  layout(title=paste0("Number of Awards over Time, per Tissue Type (", titleSnippet, ")"), yaxis = list(tickprefix=" ", title = 'Number of Awards'), xaxis = list(title = 'Year'), barmode = 'stack')
 hist2
 ```
 
-```{r}
-#SOMETHING TO BE AWARE OF --
-nOmit <- nrow(cleaned) - nrow(years)
-print(paste0(nOmit, " rows were omitted because they did not capture a year"))
+```{r,  warning=F, message=F}
+years_cut <- cleaned_cutoff %>% select(FY,Funding,Tissue) %>% filter(FY!=0)
+#grouped <- years_cut %>% group_by(FY) %>% summarize(Funding = sum(Funding))
+
+bar4 <- plot_ly(x = ~years_cut$FY, y = ~years_cut$Funding, type = 'bar',
+                name = ~years_cut$Tissue, color = ~years_cut$Tissue) %>%
+  layout(title=paste0("Amount Funding over Time, per Tissue Type (", titleSnippet, ")"), 
+         yaxis = list(tickprefix=" ", title = 'Funding ($)'), xaxis = list(title = 'Year', autotick=F), 
+         barmode = 'stack')
+bar4
+
 ```
+
+
 
